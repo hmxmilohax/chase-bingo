@@ -324,6 +324,13 @@ def generate_bingo_image(spaces: list[str], username: str) -> bytes:
         y0 = start_y + row * cell
         x1, y1 = x0 + cell, y0 + cell
         draw.rectangle([x0, y0, x1, y1], fill=(245, 245, 245, 255), outline='gray', width=1)
+        if text.startswith("image/"):
+            args = text.split("/")
+            imagename = args[1]
+            slotimg = Image.open("images/" + imagename + ".png")
+            slotimg = slotimg.resize((cell, cell))
+            img.paste(slotimg, [x0, y0, x1, y1], slotimg)
+            continue
 
         # wrap text
         max_w = cell - 10
