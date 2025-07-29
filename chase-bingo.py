@@ -3,8 +3,8 @@ import os
 import asyncio
 import io
 import random
-import datetime
-from PIL import Image, ImageDraw, ImageFont
+from datetime import datetime, timezone
+from PIL import Image, ImageDraw, ImageFont, ImageSequence
 import discord
 from discord.ext import commands, tasks
 from discord import Object
@@ -35,13 +35,13 @@ first_ready = False
 # State tracking
 last_announced_video_id = None  # only announce when this changes
 missing_misses = 0  # offline debounce counter
-last_bingo_usage: dict[int, datetime.datetime] = {}
+last_bingo_usage: dict[int, datetime] = {}
 bingo_regenerated: dict[int, bool] = {}
 
 def rel_ts(seconds: int) -> str:
     # returns a Discord dynamic timestamp for “seconds” in the future
-    run_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=seconds)
-    return f"<t:{int(run_at.timestamp())}:R>"
+    now_utc = datetime.now(timezone.utc)
+    return f"<t:{int(now_utc.timestamp())+seconds}:R>"
 
 async def find_channel(guild: discord.Guild, channel_id: int) -> discord.abc.GuildChannel:
     chan = bot.get_channel(channel_id)
@@ -164,7 +164,8 @@ async def finish_cleanup(channel: discord.TextChannel, guild: discord.Guild):
 # slash commands
 @bot.tree.command(guild=GUILD, name='bingo', description='Generate a bingo card for the current chase')
 async def bingo(interaction: discord.Interaction):
-    now = datetime.datetime.utcnow()
+    await interaction.response.defer(ephemeral=True)
+    now = datetime.now(timezone.utc)
     uid = interaction.user.id
     first = last_bingo_usage.get(uid)
     regen = bingo_regenerated.get(uid, False)
@@ -179,7 +180,7 @@ async def bingo(interaction: discord.Interaction):
     if first is not None and (now - first).total_seconds() < 3600 and regen:
         remaining = 3600 - (now - first).total_seconds()
         mins = int(remaining // 60) + 1
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             f'You’ve already regenerated once. Try again in {mins} minute(s).',
             ephemeral=True
         )
@@ -193,9 +194,12 @@ async def bingo(interaction: discord.Interaction):
     # generate image
     spaces = load_bingo_spaces()
     if len(spaces) < 25:
-        return await interaction.response.send_message('Not enough bingo spaces configured.', ephemeral=True)
+        return await interaction.followup.send('Not enough bingo spaces configured.', ephemeral=True)
 
-    image_bytes = generate_bingo_image(spaces, interaction.user.display_name)
+
+    # figure out which generation this is (1 = first, 2 = regen)
+    gen = 2 if is_regen else 1
+    image_bytes = generate_bingo_image(spaces, interaction.user.display_name, gen)
 
     # attempt DM
     try:
@@ -205,13 +209,13 @@ async def bingo(interaction: discord.Interaction):
         response_text = 'I’ve DMed you your bingo card! 📬'
         if is_regen:
             response_text += "\n\n⚠️ Please only play one board. You cannot regenerate again until the hour is up."
-        await interaction.response.send_message(response_text, ephemeral=True)
+        await interaction.followup.send(response_text, ephemeral=True)
 
     except discord.Forbidden:
         # fallback ephemeral + warning if regen
         fallback_file = discord.File(io.BytesIO(image_bytes), filename='bingo.png')
         warn = "\n\n⚠️ Please only play one board. You cannot regenerate again until the hour is up." if is_regen else ""
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"I couldn't DM you (maybe your DMs are closed?). Here is your card:{warn}",
             file=fallback_file,
             ephemeral=True
@@ -256,7 +260,7 @@ def load_bingo_spaces(path: str = 'spaces.ini') -> list[str]:
     random.shuffle(selected)
     return selected
 
-def generate_bingo_image(spaces: list[str], username: str) -> bytes:
+def generate_bingo_image(spaces: list[str], username: str, generation: int = 1) -> bytes:
     """
     Generate a styled 5x5 bingo board image with a central free space.
     """
@@ -300,9 +304,10 @@ def generate_bingo_image(spaces: list[str], username: str) -> bytes:
     y_off = (total_height - wm_rot.height) // 2
     img.paste(wm_rot, (x_off, y_off), wm_rot)
 
-    # Header with date
-    today = datetime.date.today().strftime('%B %d, %Y')
-    header_text = f"LA Chase Bingo - {today}"
+    # Header with full UTC date+time and generation
+    now = datetime.now(timezone.utc)
+    # e.g. “LA Chase Bingo – July 29, 2025 14:05 UTC (Gen 2)”
+    header_text = now.strftime(f"LA Chase Bingo - %B %d, %Y %H:%M:%S UTC (Gen {generation})")
     bbox = draw.textbbox((0, 0), header_text, font=title_font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     draw.text(((width - tw) / 2, (header_height - th) / 2), header_text, font=title_font, fill='black')
@@ -323,7 +328,12 @@ def generate_bingo_image(spaces: list[str], username: str) -> bytes:
         x0 = margin + col * cell
         y0 = start_y + row * cell
         x1, y1 = x0 + cell, y0 + cell
-        draw.rectangle([x0, y0, x1, y1], fill=(245, 245, 245, 255), outline='gray', width=1)
+        # soft‑grey checkerboard
+        if (row + col) % 2 == 0:
+            cell_bg = (245, 245, 245, 255)
+        else:
+            cell_bg = (220, 220, 220, 255)
+        draw.rectangle([x0, y0, x1, y1], fill=cell_bg, outline='gray', width=1)
         if text.startswith("image/"):
             args = text.split("/")
             imagename = args[1]
@@ -366,6 +376,24 @@ def generate_bingo_image(spaces: list[str], username: str) -> bytes:
     fw, fh = bbox[2] - bbox[0], bbox[3] - bbox[1]
     footer_y = header_height + board_draw_size + ((footer_height - fh) / 2)
     draw.text(((width - fw) / 2, footer_y), footer_text, font=footer_font, fill='black')
+
+    # ─── animated-webp background overlay ───
+    try:
+        bg_path = os.path.join(os.path.dirname(__file__), 'images', 'bg.webp')
+        webp = Image.open(bg_path)
+        # extract all frames, convert and pick one at random
+        frames = [f.copy().convert('RGBA') for f in ImageSequence.Iterator(webp)]
+        bg = random.choice(frames)
+        # force uniform 10% alpha
+        bg.putalpha(int(255 * 0.1))
+        bw, bh = bg.size
+        # tile chosen frame to fill full canvas
+        for y in range(0, total_height, bh):
+            for x in range(0, width, bw):
+                img.paste(bg, (x, y), bg)
+    except Exception:
+        # if missing or broken, just skip background
+        pass
 
     # Save as PNG bytes
     final = img.convert('RGB')
