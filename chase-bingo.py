@@ -47,6 +47,12 @@ RING_ATLAS_PATHS = [
     '/mnt/data/DifficultyRings.png',
 ]
 
+DEVIL_ICON_PATHS = [
+    os.path.join(os.path.dirname(__file__), 'images', 'devil.png'),
+    os.path.join(os.path.dirname(__file__), 'devil.png'),
+    '/mnt/data/devil.png',
+]
+
 RING_INDEX_BY_NAME = {
     "Warmup": 0,
     "Apprentice": 1,
@@ -422,6 +428,7 @@ def _draw_diff_ring_in_cell(
     ry = gy0 + ((gy1 - gy0) - side) // 2
     if atlas:
         ring = _get_ring_tile(atlas, diff_name).resize((side, side), Image.LANCZOS)
+        ring = _with_opacity(ring, 0.5)     # ← 50% opacity
         base_img.paste(ring, (rx, ry), ring)
 
     # text to draw
@@ -459,14 +466,18 @@ def _draw_diff_ring_in_cell(
     if diff_name == 'Devil':
         # icon under plate/text
         try:
-            icon = Image.open(os.path.join(os.path.dirname(__file__), 'images', 'devil.png')).convert('RGBA')
-            inner = max(1, int(side * 0.55))
-            icon = icon.resize((inner, inner), Image.LANCZOS)
-            ix = rx + (side - inner) // 2
-            iy = ry + (side - inner) // 2
-            base_img.paste(icon, (ix, iy), icon)
-        except Exception:
-            pass
+            icon = _load_devil_icon()
+            if icon is not None:
+                inner = max(1, int(side * 0.55))
+                icon = icon.resize((inner, inner), Image.LANCZOS)
+                icon = _with_opacity(icon, 0.5)   # 50% opacity
+                ix = rx + (side - inner) // 2
+                iy = ry + (side - inner) // 2
+                base_img.paste(icon, (ix, iy), icon)
+            else:
+                print("[WARN] Devil icon not found in DEVIL_ICON_PATHS; skipping.")
+        except Exception as e:
+            print(f"[WARN] Devil icon load/paste failed: {e!r}")
 
         # metrics (lines, heights, block_h, cx already computed)
         max_line_w = 0
@@ -516,6 +527,22 @@ def _draw_diff_ring_in_cell(
             draw.text((cx - lw / 2, y_line), ln, font=font, fill='black')
             y_line += h + line_gap
 
+def _with_opacity(img: Image.Image, alpha: float) -> Image.Image:
+    # Multiplies existing alpha, preserving transparency holes
+    if img.mode != 'RGBA':
+        img = img.convert('RGBA')
+    r, g, b, a = img.split()
+    a = a.point(lambda p: int(p * max(0.0, min(1.0, alpha))))
+    return Image.merge('RGBA', (r, g, b, a))
+
+def _load_devil_icon() -> Optional[Image.Image]:
+    for p in DEVIL_ICON_PATHS:
+        if os.path.exists(p):
+            try:
+                return Image.open(p).convert('RGBA')
+            except Exception:
+                pass
+    return None
 
 def generate_bingo_image(spaces: list[str], username: str, generation: int = 1, difficulty_name: str = "Solid") -> bytes:
     margin = 20
