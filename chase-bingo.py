@@ -404,56 +404,117 @@ def _draw_diff_ring_in_cell(
     base_img: Image.Image,
     draw: ImageDraw.ImageDraw,
     cell_box: Tuple[int, int, int, int],
-    diff_name: str,                         # which ring to use
+    diff_name: str,
     font: ImageFont.FreeTypeFont,
     atlas: Optional[Image.Image],
-    overlay_text: Optional[str] = None      # text drawn inside the ring (defaults to diff_name)
+    overlay_text: Optional[str] = None
 ):
     x0, y0, x1, y1 = cell_box
     pad = 2
     gx0, gy0, gx1, gy1 = x0 + pad, y0 + pad, x1 - pad, y1 - pad
 
-    # 80% grey background, NO border
+    # cell bg
     draw.rectangle([gx0, gy0, gx1, gy1], fill=(204, 204, 204, 255))
 
-    # Paste ring (bigger than before)
+    # ring placement
+    side = max(1, min(gx1 - gx0, gy1 - gy0) - 4)
+    rx = gx0 + ((gx1 - gx0) - side) // 2
+    ry = gy0 + ((gy1 - gy0) - side) // 2
     if atlas:
-        ring = _get_ring_tile(atlas, diff_name)
-        side = max(1, min(gx1 - gx0, gy1 - gy0) - 4)
-        ring = ring.resize((side, side), Image.LANCZOS)
-        rx = gx0 + ((gx1 - gx0) - side) // 2
-        ry = gy0 + ((gy1 - gy0) - side) // 2
+        ring = _get_ring_tile(atlas, diff_name).resize((side, side), Image.LANCZOS)
         base_img.paste(ring, (rx, ry), ring)
 
-    # Pick text: either the difficulty name or a custom prompt
+    # text to draw
     text = overlay_text if overlay_text is not None else diff_name
 
-    # wrap & center inside the cell
+    # wrap with explicit hard line breaks
     max_w = (gx1 - gx0) - 12
-    words = text.split()
-    lines, cur = [], ''
-    for w in words:
-        test = (cur + ' ' + w).strip()
-        tb = draw.textbbox((0, 0), test, font=font)
-        if (tb[2] - tb[0]) <= max_w:
-            cur = test
-        else:
-            lines.append(cur)
-            cur = w
-    lines.append(cur)
+    lines = []
+    for para in text.splitlines():          # ← preserves '\n'
+        words = para.split()
+        if not words:
+            lines.append("")                # keep blank lines if any
+            continue
+        cur = words[0]
+        for w in words[1:]:
+            test = f"{cur} {w}"
+            tb = draw.textbbox((0, 0), test, font=font)
+            if (tb[2] - tb[0]) <= max_w:
+                cur = test
+            else:
+                lines.append(cur)
+                cur = w
+        lines.append(cur)
+
     if len(lines) > 4:
         lines = lines[:4]
         lines[-1] += '…'
 
-    heights = [(draw.textbbox((0, 0), ln, font=font)[3] - draw.textbbox((0, 0), ln, font=font)[1]) for ln in lines]
-    block_h = sum(heights) + (len(heights) - 1) * 4
+    # metrics
+    line_gap = 4
+    heights = [draw.textbbox((0, 0), ln, font=font)[3] - draw.textbbox((0, 0), ln, font=font)[1] for ln in lines]
+    block_h = sum(heights) + (len(heights) - 1) * line_gap
     cx = (x0 + x1) // 2
-    ty = y0 + (y1 - y0 - block_h) // 2
-    for ln, h in zip(lines, heights):
-        lb = draw.textbbox((0, 0), ln, font=font)
-        lw = lb[2] - lb[0]
-        draw.text((cx - lw / 2, ty), ln, font=font, fill='black')
-        ty += h + 4
+
+    if diff_name == 'Devil':
+        # icon under plate/text
+        try:
+            icon = Image.open(os.path.join(os.path.dirname(__file__), 'images', 'devil.png')).convert('RGBA')
+            inner = max(1, int(side * 0.55))
+            icon = icon.resize((inner, inner), Image.LANCZOS)
+            ix = rx + (side - inner) // 2
+            iy = ry + (side - inner) // 2
+            base_img.paste(icon, (ix, iy), icon)
+        except Exception:
+            pass
+
+        # metrics (lines, heights, block_h, cx already computed)
+        max_line_w = 0
+        for ln in lines:
+            bb = draw.textbbox((0, 0), ln, font=font)
+            max_line_w = max(max_line_w, bb[2] - bb[0])
+
+        bottom_margin = 0                 # sit at the very bottom
+        y_bottom = gy1 - 1                # 1px inset to avoid bleeding the cell border
+        ty = y_bottom - block_h           # lines grow upward
+
+        # tight padding + shave 1px header
+        PAD_X = 6
+        HEAD_TRIM = 1
+        px0 = int(cx - max_line_w / 2) - PAD_X
+        px1 = int(cx + max_line_w / 2) + PAD_X
+        py0 = int(ty) - HEAD_TRIM
+        py1 = int(y_bottom)
+
+        # clamp
+        px0 = max(px0, gx0 + 1)
+        py0 = max(py0, gy0 + 1)
+        px1 = min(px1, gx1 - 1)
+        py1 = min(py1, gy1 - 1)
+
+        # translucent plate (~30% opacity) via overlay, so alpha actually works
+        plate_w = max(1, px1 - px0)
+        plate_h = max(1, py1 - py0)
+        plate = Image.new('RGBA', (plate_w, plate_h), (255, 255, 255, 140))  # 76 ≈ 30%
+        base_img.paste(plate, (px0, py0), plate)
+
+        # text over the plate (bottom-anchored block)
+        TEXT_NUDGE = -3   # move text up 2px; try -1 if you want even subtler
+        y_line = ty + TEXT_NUDGE
+        for ln, h in zip(lines, heights):
+            lb = draw.textbbox((0, 0), ln, font=font)
+            lw = lb[2] - lb[0]
+            draw.text((cx - lw / 2, y_line), ln, font=font, fill='black')
+            y_line += h + line_gap
+    else:
+        # non-Devil: centered text (honors \n via splitlines() above)
+        ty = y0 + ((y1 - y0) - block_h) // 2
+        y_line = ty
+        for ln, h in zip(lines, heights):
+            lb = draw.textbbox((0, 0), ln, font=font)
+            lw = lb[2] - lb[0]
+            draw.text((cx - lw / 2, y_line), ln, font=font, fill='black')
+            y_line += h + line_gap
 
 
 def generate_bingo_image(spaces: list[str], username: str, generation: int = 1, difficulty_name: str = "Solid") -> bytes:
@@ -467,10 +528,12 @@ def generate_bingo_image(spaces: list[str], username: str, generation: int = 1, 
     try:
         title_font = ImageFont.truetype('arial.ttf', size=24)
         cell_font = ImageFont.truetype('arial.ttf', size=16)
+        cell_font_small = ImageFont.truetype('arial.ttf', size=15)  # ← slightly smaller
         footer_font = ImageFont.truetype('arial.ttf', size=18)
     except IOError:
         title_font = ImageFont.load_default()
         cell_font = ImageFont.load_default()
+        cell_font_small = cell_font  # fallback if TTF not available
         footer_font = ImageFont.load_default()
 
     # We only show a center title now (no corner dots/badge)
@@ -550,11 +613,15 @@ def generate_bingo_image(spaces: list[str], username: str, generation: int = 1, 
                                         'Devil', cell_font, ring_atlas,
                                         overlay_text=center_text)
             else:
-                # non-Devil: ring matches the difficulty; inside text is the difficulty name
-                _draw_diff_ring_in_cell(img, draw, (x0, y0, x1, y1),
-                                        difficulty_name, cell_font, ring_atlas,
-                                        overlay_text=difficulty_name)
+                # non-Devil: ring matches the difficulty; inside text marks it as the Free Space
+                label = f"{difficulty_name}\n(Free Space)"
+                _draw_diff_ring_in_cell(
+                    img, draw, (x0, y0, x1, y1),
+                    difficulty_name, cell_font_small, ring_atlas,  # ← use smaller font here
+                    overlay_text=label
+                )
             continue  # center already drawn
+
 
         # images-in-cells still supported
         if isinstance(text, str) and text.startswith("image/"):
