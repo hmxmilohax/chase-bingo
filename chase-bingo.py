@@ -240,9 +240,9 @@ def load_bingo_spaces(path: str = 'spaces.ini') -> list[str]:
     hard_spaces = list(spaces_cfg['Hard'])
 
     # Weighted selection: fewer 'Hard', more 'Easy'
-    easy_count = 17
-    medium_count = 5
-    hard_count = 3
+    easy_count = 20
+    medium_count = 3
+    hard_count = 2
 
     selected = []
     selected += random.sample(easy_spaces, min(easy_count, len(easy_spaces)))
