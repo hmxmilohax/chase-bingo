@@ -254,7 +254,7 @@ async def finish_cleanup(channel: discord.TextChannel, guild: discord.Guild):
 
 
 @bot.tree.command(guild=GUILD, name='bingo', description='Generate a bingo card for the current chase')
-@app_commands.describe(difficulty="Pick a difficulty (optional)")
+@app_commands.describe(difficulty="Pick a difficulty (optional; blank = random)")
 @app_commands.choices(
     difficulty=[
         # name choices
@@ -301,15 +301,20 @@ async def bingo(interaction: discord.Interaction, difficulty: Optional[app_comma
         1: "Warmup", 2: "Apprentice", 3: "Solid", 4: "Moderate",
         5: "Challenging", 6: "Nightmare", 7: "Impossible"
     }
-    chosen_diff_name = "Solid"
+    # If the user supplies no option, pick a random difficulty (including Devil).
+    chosen_diff_name = None
     if difficulty:
         raw = difficulty.value.strip()
         if raw.isdigit():
-            chosen_diff_name = num_to_name.get(int(raw), "Solid")
+            chosen_diff_name = num_to_name.get(int(raw))
         else:
-            chosen_diff_name = raw  # ← keep Devil as Devil
-        if chosen_diff_name not in DIFFICULTY_WEIGHTS:
-            chosen_diff_name = "Solid"
+            chosen_diff_name = raw  # keep "Devil" as "Devil"
+
+    # Fallbacks: invalid/input missing -> random pick
+    if not chosen_diff_name or chosen_diff_name not in DIFFICULTY_WEIGHTS:
+        tier_pool   = list(DIFFICULTY_WEIGHTS.keys())
+        tier_weight = [0.6,1,1,1,0.5,0.4,0.3,0.1]
+        chosen_diff_name = random.choices(tier_pool, weights=tier_weight, k=1)[0]
 
     # ── build spaces with chosen weights ──
     spaces = load_bingo_spaces(difficulty_name=chosen_diff_name)
