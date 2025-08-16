@@ -14,7 +14,7 @@ from typing import Optional, Tuple
 
 # Load config
 config = configparser.ConfigParser()
-config.read(os.path.join(os.path.dirname(__file__), 'config.ini'))
+config.read(os.path.join(os.path.dirname(__file__), 'config.ini'), encoding='utf-8')
 
 # Discord credentials & IDs
 discord_token = config['discord']['token']
@@ -25,7 +25,7 @@ ROLE_ID = int(config['channels']['role_id'])
 INACTIVE_CATEGORY_ID = int(config['channels']['inactive_category_id'])
 ACTIVE_CATEGORY_ID = int(config['channels']['active_category_id'])
 YOUTUBE_CHANNEL_ID = config['youtube']['channel_id']
-TEST_MODE = False
+TEST_MODE = True
 
 # Bot setup
 intents = discord.Intents.default()
@@ -90,6 +90,29 @@ DIFFICULTY_WEIGHTS = {
 }
 NAME_BY_NUMBER = {num: name for (name, num, _) in DIFFICULTY_ORDER}
 FILLED_BY_NAME = {name: filled for (name, _, filled) in DIFFICULTY_ORDER}
+
+LANG_EN = {
+    "regen_already": "You’ve already regenerated once. Try again in {mins} minute(s).",
+    "dm_title": "Here's your bingo board:",
+    "dm_followup": "I’ve DMed you your bingo card!",
+    "dm_blocked": "I couldn't DM you (maybe your DMs are closed?). Here is your card:",
+    "regen_warn": "⚠️ Please only play one board. You cannot regenerate again until the hour is up.",
+    "header_prefix": "LA Chase Bingo",
+    "free_space_label": "(Free Space)",
+    "free_space_marker": "Takes place in Los Angeles FREE SPACE",
+}
+
+LANG_ES = {
+    "regen_already": "Ya regeneraste una vez. Intenta de nuevo en {mins} minuto(s).",
+    "dm_title": "Aqui esta tu tablero:",
+    "dm_followup": "¡Te mande tu tablero por privado!",
+    "dm_blocked": "No pude mandarte un mensaje privado. (¿Estan cerrados?) Aqui esta tu tablero:",
+    "regen_warn": ":warning: Solo juega un tablero. No puedes generar por una hora.",
+    "header_prefix": "Bingo de LA",
+    "free_space_label": "(Espacio libre)",
+    "free_space_marker": "Persecución en Los Ángeles ESPACIO LIBRE",
+}
+
 
 async def safe_set_permissions(channel: discord.TextChannel, guild: discord.Guild, view: bool):
     if TEST_MODE:
@@ -253,25 +276,15 @@ async def finish_cleanup(channel: discord.TextChannel, guild: discord.Guild):
     await channel.send("Channel moved to inactive category and hidden.")
 
 
-@bot.tree.command(guild=GUILD, name='bingo', description='Generate a bingo card for the current chase')
-@app_commands.describe(difficulty="Pick a difficulty (optional; blank = random)")
-@app_commands.choices(
-    difficulty=[
-        # name choices
-        app_commands.Choice(name="Warmup", value="Warmup"),
-        app_commands.Choice(name="Apprentice", value="Apprentice"),
-        app_commands.Choice(name="Solid", value="Solid"),
-        app_commands.Choice(name="Moderate", value="Moderate"),
-        app_commands.Choice(name="Challenging", value="Challenging"),
-        app_commands.Choice(name="Nightmare", value="Nightmare"),
-        app_commands.Choice(name="Impossible", value="Impossible"),
-        app_commands.Choice(name="Devil", value="Devil"),
-    ]
-)
-async def bingo(interaction: discord.Interaction, difficulty: Optional[app_commands.Choice[str]] = None):
+async def _bingo_core(
+    interaction: discord.Interaction,
+    difficulty: Optional[app_commands.Choice[str]],
+    ini_filename: str,
+    lang: dict = LANG_EN,   # ← new
+):
     await interaction.response.defer(ephemeral=True)
 
-    # ── regen window logic (unchanged) ──
+    # regen window (unchanged logic, localized strings)
     now = datetime.now(timezone.utc)
     uid = interaction.user.id
     first = last_bingo_usage.get(uid)
@@ -286,7 +299,7 @@ async def bingo(interaction: discord.Interaction, difficulty: Optional[app_comma
         remaining = 3600 - (now - first).total_seconds()
         mins = int(remaining // 60) + 1
         return await interaction.followup.send(
-            f'You’ve already regenerated once. Try again in {mins} minute(s).',
+            lang["regen_already"].format(mins=mins),
             ephemeral=True
         )
 
@@ -295,57 +308,77 @@ async def bingo(interaction: discord.Interaction, difficulty: Optional[app_comma
         bingo_regenerated[uid] = True
         is_regen = True
 
-    # ── resolve difficulty from dropdown choice ──
-    # (Explicit mapping so we don't depend on DIFFICULTY_ORDER/NAME_BY_NUMBER.)
-    num_to_name = {
-        1: "Warmup", 2: "Apprentice", 3: "Solid", 4: "Moderate",
-        5: "Challenging", 6: "Nightmare", 7: "Impossible"
-    }
-    # If the user supplies no option, pick a random difficulty (including Devil).
+    # difficulty resolution (unchanged)
+    num_to_name = {1:"Warmup",2:"Apprentice",3:"Solid",4:"Moderate",5:"Challenging",6:"Nightmare",7:"Impossible"}
     chosen_diff_name = None
     if difficulty:
         raw = difficulty.value.strip()
-        if raw.isdigit():
-            chosen_diff_name = num_to_name.get(int(raw))
-        else:
-            chosen_diff_name = raw  # keep "Devil" as "Devil"
-
-    # Fallbacks: invalid/input missing -> random pick
+        chosen_diff_name = num_to_name.get(int(raw)) if raw.isdigit() else raw
     if not chosen_diff_name or chosen_diff_name not in DIFFICULTY_WEIGHTS:
-        tier_pool   = list(DIFFICULTY_WEIGHTS.keys())
+        tier_pool = list(DIFFICULTY_WEIGHTS.keys())
         tier_weight = [0.6,1,1,1,0.5,0.4,0.3,0.1]
         chosen_diff_name = random.choices(tier_pool, weights=tier_weight, k=1)[0]
 
-    # ── build spaces with chosen weights ──
-    spaces = load_bingo_spaces(difficulty_name=chosen_diff_name)
+    # build & render
+    spaces = load_bingo_spaces(path=ini_filename, difficulty_name=chosen_diff_name)
     if len(spaces) < 25:
         return await interaction.followup.send('Not enough bingo spaces configured.', ephemeral=True)
 
-    # ── render image ──
-    gen = 2 if is_regen else 1
     image_bytes = generate_bingo_image(
         spaces,
         interaction.user.display_name,
-        generation=gen,
-        difficulty_name=chosen_diff_name
+        generation=(2 if is_regen else 1),
+        difficulty_name=chosen_diff_name,
+        lang=lang,  # ← pass i18n
     )
 
-    # ── DM first; fall back to ephemeral ──
+    # DM then fallback (localized)
     try:
         dm_file = discord.File(io.BytesIO(image_bytes), filename='bingo.png')
-        await interaction.user.send("Here's your bingo board:", file=dm_file)
-        response_text = 'I’ve DMed you your bingo card!'
+        await interaction.user.send(lang["dm_title"], file=dm_file)
+        response_text = lang["dm_followup"]
         if is_regen:
-            response_text += "\n\n⚠️ Please only play one board. You cannot regenerate again until the hour is up."
+            response_text += f"\n\n{lang['regen_warn']}"
         await interaction.followup.send(response_text, ephemeral=True)
     except discord.Forbidden:
         fallback_file = discord.File(io.BytesIO(image_bytes), filename='bingo.png')
-        warn = "\n\n⚠️ Please only play one board. You cannot regenerate again until the hour is up." if is_regen else ""
-        await interaction.followup.send(
-            f"I couldn't DM you (maybe your DMs are closed?). Here is your card:{warn}",
-            file=fallback_file,
-            ephemeral=True
-        )
+        warn = f"\n\n{lang['regen_warn']}" if is_regen else ""
+        await interaction.followup.send(f"{lang['dm_blocked']}{warn}", file=fallback_file, ephemeral=True)
+
+
+@bot.tree.command(guild=GUILD, name='bingo', description='Generate a bingo card for the current chase')
+@app_commands.describe(difficulty="Pick a difficulty (optional; blank = random)")
+@app_commands.choices(
+    difficulty=[
+        app_commands.Choice(name="Warmup", value="Warmup"),
+        app_commands.Choice(name="Apprentice", value="Apprentice"),
+        app_commands.Choice(name="Solid", value="Solid"),
+        app_commands.Choice(name="Moderate", value="Moderate"),
+        app_commands.Choice(name="Challenging", value="Challenging"),
+        app_commands.Choice(name="Nightmare", value="Nightmare"),
+        app_commands.Choice(name="Impossible", value="Impossible"),
+        app_commands.Choice(name="Devil", value="Devil"),
+    ]
+)
+async def bingo(interaction: discord.Interaction, difficulty: Optional[app_commands.Choice[str]] = None):
+    await _bingo_core(interaction, difficulty, ini_filename='spaces.ini', lang=LANG_EN)
+
+@bot.tree.command(guild=GUILD, name='bingo_es', description='Genera un cartón de bingo (espacios en español)')
+@app_commands.describe(difficulty="Pick a difficulty (optional; blank = random)")
+@app_commands.choices(
+    difficulty=[
+        app_commands.Choice(name="Warmup", value="Warmup"),
+        app_commands.Choice(name="Apprentice", value="Apprentice"),
+        app_commands.Choice(name="Solid", value="Solid"),
+        app_commands.Choice(name="Moderate", value="Moderate"),
+        app_commands.Choice(name="Challenging", value="Challenging"),
+        app_commands.Choice(name="Nightmare", value="Nightmare"),
+        app_commands.Choice(name="Impossible", value="Impossible"),
+        app_commands.Choice(name="Devil", value="Devil"),
+    ]
+)
+async def bingo_es(interaction: discord.Interaction, difficulty: Optional[app_commands.Choice[str]] = None):
+    await _bingo_core(interaction, difficulty, ini_filename='spaces_esp.ini', lang=LANG_ES)
 
 
 @bot.tree.command(guild=GUILD, name='chase', description='Get the current live chase link')
@@ -358,7 +391,7 @@ async def chase(interaction: discord.Interaction):
 def load_bingo_spaces(path: str = 'spaces.ini', difficulty_name: str = 'Solid') -> list[str]:
     spaces_cfg = configparser.ConfigParser(allow_no_value=True)
     spaces_cfg.optionxform = str
-    spaces_cfg.read(os.path.join(os.path.dirname(__file__), path))
+    spaces_cfg.read(os.path.join(os.path.dirname(__file__), path), encoding='utf-8')
 
     easy_spaces = list(spaces_cfg['Easy'])
     medium_spaces = list(spaces_cfg['Medium'])
@@ -549,7 +582,13 @@ def _load_devil_icon() -> Optional[Image.Image]:
                 pass
     return None
 
-def generate_bingo_image(spaces: list[str], username: str, generation: int = 1, difficulty_name: str = "Solid") -> bytes:
+def generate_bingo_image(
+    spaces: list[str],
+    username: str,
+    generation: int = 1,
+    difficulty_name: str = "Solid",
+    lang: dict = LANG_EN,
+) -> bytes:
     margin = 20
     footer_height = 40
     board_size = 600
@@ -570,7 +609,7 @@ def generate_bingo_image(spaces: list[str], username: str, generation: int = 1, 
 
     # We only show a center title now (no corner dots/badge)
     now = datetime.now(timezone.utc)
-    header_text = now.strftime(f"LA Chase Bingo - %B %d, %Y %H:%M:%S UTC (Gen {generation})")
+    header_text = now.strftime(f"{lang['header_prefix']} - %B %d, %Y %H:%M:%S UTC (Gen {generation})")
     tmp = Image.new('RGBA', (10, 10), (0, 0, 0, 0))
     tmp_draw = ImageDraw.Draw(tmp)
     th_bbox = tmp_draw.textbbox((0, 0), header_text, font=title_font)
@@ -602,13 +641,17 @@ def generate_bingo_image(spaces: list[str], username: str, generation: int = 1, 
 
     # ── choose spaces; center slot reserved for difficulty badge ──
     # ── board contents (no placeholder strings) ──
-    free_space_text = 'Takes place in Los Angeles FREE SPACE'
+    free_space_markers = {
+        lang["free_space_marker"],
+        "Takes place in Los Angeles FREE SPACE",      # safety: EN
+        "Persecución en Los Ángeles ESPACIO LIBRE",        # safety: ES
+    }
     ring_atlas = _load_ring_atlas()
     is_devil = (difficulty_name.strip().lower() == 'devil')
 
     if is_devil:
         # Devil: 25 real prompts (no free space)
-        pool = [s for s in spaces if s != free_space_text]
+        pool = [s for s in spaces if s not in free_space_markers]
         if len(pool) >= 25:
             chosen = random.sample(pool, 25)
         else:
@@ -617,7 +660,7 @@ def generate_bingo_image(spaces: list[str], username: str, generation: int = 1, 
                 chosen.append(random.choice(pool))
     else:
         # Other tiers: 24 prompts; center is the difficulty badge
-        available = [s for s in spaces if s != free_space_text]
+        available = [s for s in spaces if s not in free_space_markers]
         chosen = random.sample(available, 24) if len(available) >= 24 else available[:]
         while len(chosen) < 24 and available:
             chosen.append(random.choice(available))
@@ -646,7 +689,7 @@ def generate_bingo_image(spaces: list[str], username: str, generation: int = 1, 
                                         overlay_text=center_text)
             else:
                 # non-Devil: ring matches the difficulty; inside text marks it as the Free Space
-                label = f"{difficulty_name}\n(Free Space)"
+                label = f"{difficulty_name}\n{lang['free_space_label']}"
                 _draw_diff_ring_in_cell(
                     img, draw, (x0, y0, x1, y1),
                     difficulty_name, cell_font_small, ring_atlas,  # ← use smaller font here
