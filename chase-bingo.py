@@ -25,7 +25,7 @@ ROLE_ID = int(config['channels']['role_id'])
 INACTIVE_CATEGORY_ID = int(config['channels']['inactive_category_id'])
 ACTIVE_CATEGORY_ID = int(config['channels']['active_category_id'])
 YOUTUBE_CHANNEL_ID = config['youtube']['channel_id']
-TEST_MODE = True
+TEST_MODE = False
 
 # Bot setup
 intents = discord.Intents.default()
