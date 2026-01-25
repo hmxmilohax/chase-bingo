@@ -1,0 +1,13 @@
+services:
+  chase-bingo:
+    build: .
+    container_name: chase-bingo
+    restart: unless-stopped
+    environment:
+      - TZ=America/Chicago
+    volumes:
+      - chase_bingo_repo:/opt/chase-bingo
+      - ${HOME}/configs/chase-bingo/config.ini:/config/config.ini:ro
+
+volumes:
+  chase_bingo_repo:
