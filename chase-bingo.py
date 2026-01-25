@@ -598,7 +598,7 @@ def generate_bingo_image(
 
     try:
         BASE = os.path.dirname(__file__)
-        FONT_PATH = os.path.join(BASE, "pentatonic.ttf")
+        FONT_PATH = os.path.join(BASE, "eaglelight.otf")
         title_font = ImageFont.truetype(FONT_PATH, 24)
         cell_font = ImageFont.truetype(FONT_PATH, 16)
         cell_font_small = ImageFont.truetype(FONT_PATH, 15)
