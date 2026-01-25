@@ -597,10 +597,12 @@ def generate_bingo_image(
     board_draw_size = cell * 5
 
     try:
-        title_font = ImageFont.truetype('arial.ttf', size=24)
-        cell_font = ImageFont.truetype('arial.ttf', size=16)
-        cell_font_small = ImageFont.truetype('arial.ttf', size=15)  # ← slightly smaller
-        footer_font = ImageFont.truetype('arial.ttf', size=18)
+        BASE = os.path.dirname(__file__)
+        FONT_PATH = os.path.join(BASE, "pentatonic.ttf")
+        title_font = ImageFont.truetype(FONT_PATH, 24)
+        cell_font = ImageFont.truetype(FONT_PATH, 16)
+        cell_font_small = ImageFont.truetype(FONT_PATH, 15)
+        footer_font = ImageFont.truetype(FONT_PATH, 18)
     except IOError:
         title_font = ImageFont.load_default()
         cell_font = ImageFont.load_default()
