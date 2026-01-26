@@ -704,9 +704,16 @@ def generate_bingo_image(
         # images-in-cells still supported
         if isinstance(text, str) and text.startswith("image/"):
             imagename = text.split("/")[1]
-            slotimg = Image.open("images/" + imagename + ".png").resize((cell, cell))
-            img.paste(slotimg, [x0, y0, x1, y1], slotimg)
+            path = os.path.join(os.path.dirname(__file__), "images", imagename + ".png")
+
+            slotimg = Image.open(path).convert("RGBA").resize((cell, cell), Image.LANCZOS)
+
+            # If it has an alpha channel, use it as the mask; otherwise paste without a mask.
+            mask = slotimg.getchannel("A") if "A" in slotimg.getbands() else None
+
+            img.paste(slotimg, (x0, y0), mask)
             continue
+
 
         # normal prompt rendering
         if not isinstance(text, str):
