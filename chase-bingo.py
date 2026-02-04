@@ -16,6 +16,9 @@ from typing import Optional, Tuple
 config = configparser.ConfigParser()
 config.read(os.path.join(os.path.dirname(__file__), 'config.ini'), encoding='utf-8')
 
+BOOT_INFO_CHANNEL_ID = 1146938356664639589
+BOT_START_TIME = datetime.now(timezone.utc)
+_boot_info_posted = False
 # Discord credentials & IDs
 discord_token = config['discord']['token']
 GUILD_ID = int(config['guild']['id'])
@@ -26,6 +29,10 @@ INACTIVE_CATEGORY_ID = int(config['channels']['inactive_category_id'])
 ACTIVE_CATEGORY_ID = int(config['channels']['active_category_id'])
 YOUTUBE_CHANNEL_ID = config['youtube']['channel_id']
 TEST_MODE = False
+# GitHub info
+GITHUB_TOKEN = config.get('github', 'token', fallback=None)
+GITHUB_REPO = config.get('github', 'repo', fallback='hmxmilohax/chase-bingo')     # owner/repo
+GITHUB_BRANCH = config.get('github', 'branch', fallback='main')
 
 # Bot setup
 intents = discord.Intents.default()
@@ -182,9 +189,117 @@ async def deferred_cleanup(channel, guild):
     await asyncio.sleep(600)
     await finish_cleanup(channel, guild)
 
+def _github_repo_branch_url(repo: str, branch: str) -> str:
+    if not repo or "/" not in repo:
+        return ""
+    return f"https://github.com/{repo}/tree/{branch}"
+
+def _dt_to_discord_rel(dt: datetime | None) -> str:
+    if not dt:
+        return "Unknown"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return f"<t:{int(dt.timestamp())}:R>"
+
+async def _get_latest_commit_via_github(repo: str, branch: str) -> dict:
+    """
+    GitHub API (no auth needed for public, token helps rate limits).
+    Returns dict with: sha_short, url, message, date_dt, error
+    """
+    info = {
+        "repo": repo,
+        "branch": branch,
+        "sha_short": None,
+        "url": None,
+        "message": None,
+        "date_dt": None,
+        "error": None,
+    }
+
+    if not repo or "/" not in repo:
+        info["error"] = "Invalid repo (expected 'owner/repo')"
+        return info
+
+    owner, name = repo.split("/", 1)
+    commits_url = f"https://api.github.com/repos/{owner}/{name}/commits?sha={branch}&per_page=1"
+
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(commits_url, headers=headers) as resp:
+                if resp.status != 200:
+                    info["error"] = f"GitHub API error listing commits: {resp.status}"
+                    return info
+                commits = await resp.json()
+    except Exception as e:
+        info["error"] = f"GitHub request failed: {e!r}"
+        return info
+
+    if not commits:
+        info["error"] = "No commits returned"
+        return info
+
+    latest = commits[0]
+    sha = latest.get("sha") or ""
+    info["sha_short"] = sha[:7] if sha else None
+    info["url"] = latest.get("html_url")
+
+    commit_obj = latest.get("commit") or {}
+    msg = (commit_obj.get("message") or "").splitlines()[0].strip()
+    info["message"] = msg or None
+
+    date_str = ((commit_obj.get("committer") or {}).get("date")) or ((commit_obj.get("author") or {}).get("date"))
+    if date_str:
+        # "2026-02-03T12:34:56Z" -> aware dt
+        info["date_dt"] = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+
+    return info
+
+async def build_info_embed(bot: commands.Bot) -> discord.Embed:
+    commit = await _get_latest_commit_via_github(GITHUB_REPO, GITHUB_BRANCH)
+
+    ping_ms = bot.latency * 1000.0
+    started_rel = _dt_to_discord_rel(BOT_START_TIME)
+
+    embed = discord.Embed(
+        title="Chase Bingo - Info",
+        color=discord.Color.purple()
+    )
+
+    embed.add_field(name="Uptime", value=f"Started {started_rel}", inline=False)
+    embed.add_field(name="Ping", value=f"{ping_ms:.2f}ms", inline=True)
+
+    if commit.get("error"):
+        embed.add_field(name="Latest GitHub Commit", value=f"Unavailable — {commit['error']}", inline=False)
+    else:
+        repo = commit.get("repo") or "Unknown"
+        branch = commit.get("branch") or "Unknown"
+        repo_url = _github_repo_branch_url(repo, branch)
+        repo_line = f"Repository - [{repo}/{branch}]({repo_url})" if repo_url else f"Repository - {repo}/{branch}"
+
+        sha_short = commit.get("sha_short") or "Unknown"
+        url = commit.get("url") or ""
+        msg = commit.get("message") or ""
+        commit_rel = _dt_to_discord_rel(commit.get("date_dt"))
+
+        commit_line = f"[`{sha_short}`]({url}) • {commit_rel}" if url else f"`{sha_short}` • {commit_rel}"
+        desc = "\n".join(x for x in [repo_line, commit_line, msg] if x).strip()
+
+        embed.add_field(name="Latest GitHub Commit", value=desc[:1024] if desc else "Unknown", inline=False)
+
+    embed.set_footer(text="Tip: use /bingo to generate your bingo card!")
+    return embed
+
+async def send_info_embed_to_channel(channel: discord.abc.Messageable):
+    embed = await build_info_embed(bot)
+    await channel.send(embed=embed)
+
 @bot.event
 async def on_ready():
-    global first_ready
+    global first_ready, _boot_info_posted
     if not first_ready:
         first_ready = True
         print(f'Logged in as {bot.user} (ID: {bot.user.id})')
@@ -192,13 +307,27 @@ async def on_ready():
             await initialize_channel()
         except Exception as e:
             print(f'[WARN] initialize_channel failed: {e!r}')
-        # Avoid global sync; just do guild sync
+
         synced = await bot.tree.sync(guild=GUILD)
         print(f'Synced {len(synced)} guild commands')
+
         await check_live_status()
         check_live_status.start()
+
+        # --- Boot info post (once) ---
+        if not _boot_info_posted:
+            guild = bot.guilds[0] if bot.guilds else None
+            if guild:
+                ch = await find_channel(guild, BOOT_INFO_CHANNEL_ID)
+                if ch:
+                    try:
+                        await send_info_embed_to_channel(ch)
+                        _boot_info_posted = True
+                    except Exception as e:
+                        print(f"[WARN] Failed to post boot info embed: {e!r}")
     else:
         print("on_ready fired again; skipping sync.")
+
 
 @tasks.loop(seconds=60)
 async def check_live_status():
@@ -380,6 +509,11 @@ async def bingo(interaction: discord.Interaction, difficulty: Optional[app_comma
 async def bingo_es(interaction: discord.Interaction, difficulty: Optional[app_commands.Choice[str]] = None):
     await _bingo_core(interaction, difficulty, ini_filename='spaces_esp.ini', lang=LANG_ES)
 
+@bot.tree.command(guild=GUILD, name='info', description='Show bot status and latest GitHub commit')
+async def info(interaction: discord.Interaction):
+    embed = await build_info_embed(bot)
+    # Public by default (mirrors old !info). Flip to ephemeral=True if you want it private.
+    await interaction.response.send_message(embed=embed, ephemeral=False)
 
 @bot.tree.command(guild=GUILD, name='chase', description='Get the current live chase link')
 async def chase(interaction: discord.Interaction):
